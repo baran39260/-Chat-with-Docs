@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Documentation Browser</title>
+  <script>
+    // Prevents FOUC (flash of unstyled content)
+    (function() {
+      try {
+        var theme = 'dark'; // default theme
+        var savedTheme = localStorage.getItem('theme');
+        if (savedTheme) {
+          theme = savedTheme;
+        } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
+          theme = 'light';
+        }
+        if (theme === 'dark') {
+          document.documentElement.classList.add('dark');
+        }
+      } catch (e) {
+        // Ignores errors from localStorage or matchMedia not being available
+      }
+    })();
+  </script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="/index.css">
+<script type="importmap">
+{
+  "imports": {
+    "@google/genai": "https://esm.sh/@google/genai@^1.0.1",
+    "react-dom/": "https://esm.sh/react-dom@^19.1.0/",
+    "react/": "https://esm.sh/react@^19.1.0/",
+    "react": "https://esm.sh/react@^19.1.0",
+    "marked": "https://esm.sh/marked@^13.0.2",
+    "lucide-react": "https://esm.sh/lucide-react@^0.417.0",
+    "highlight.js": "https://esm.sh/highlight.js@^11.9.0",
+    "pdfjs-dist": "https://esm.sh/pdfjs-dist@^4.5.136",
+    "pdfjs-dist/": "https://esm.sh/pdfjs-dist@^4.5.136/"
+  }
+}
+</script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="module" src="/index.tsx"></script>
+</body>
+</html>
