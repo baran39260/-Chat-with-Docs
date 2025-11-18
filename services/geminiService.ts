@@ -7,21 +7,19 @@
 import { GoogleGenAI, GenerateContentResponse, Tool, HarmCategory, HarmBlockThreshold, Content } from "@google/genai";
 import { UrlContextMetadataItem, KnowledgeItem } from '../types';
 
-// IMPORTANT: The API key MUST be set as an environment variable `process.env.API_KEY`
-const API_KEY = process.env.API_KEY;
-
 let ai: GoogleGenAI;
 
 // Model supporting URL context, consistent with user examples and documentation.
 const MODEL_NAME = "gemini-2.5-flash"; 
 
 const getAiInstance = (): GoogleGenAI => {
-  if (!API_KEY) {
+  const apiKey = process.env.API_KEY;
+  if (!apiKey) {
     console.error("API_KEY is not set in environment variables. Please set process.env.API_KEY.");
     throw new Error("Gemini API Key not configured. Set process.env.API_KEY.");
   }
   if (!ai) {
-    ai = new GoogleGenAI({ apiKey: API_KEY });
+    ai = new GoogleGenAI({ apiKey: apiKey });
   }
   return ai;
 };
@@ -49,15 +47,25 @@ const buildPromptWithContext = (prompt: string, items: KnowledgeItem[]): { fullP
   const files = items
     .filter((item): item is { type: 'file'; name: string; content: string; mimeType: string; } => item.type === 'file');
 
-  let contextPrompt = '';
+  const contextPromptParts: string[] = [];
+
   if (files.length > 0) {
     const fileContent = files.map(file => `--- Local File: ${file.name} ---\n${file.content}`).join('\n\n');
-    contextPrompt = `Use the following local file content as primary context:\n${fileContent}\n\n---\n\n`;
+    contextPromptParts.push(`Use the following local file content as primary context:\n${fileContent}`);
   }
 
-  let fullPrompt = contextPrompt + prompt;
+  if (urls.length > 0) {
+    contextPromptParts.push(`Also use the content from the following URLs as context:\n${urls.join('\n')}`);
+  }
 
-  const tools: Tool[] = urls.length > 0 ? [{ urlContext: {} }] : [];
+  let fullPrompt = prompt;
+  if (contextPromptParts.length > 0) {
+      const contextPrompt = contextPromptParts.join('\n\n') + '\n\n---\n\n';
+      fullPrompt = contextPrompt + prompt;
+  }
+
+  // Pass the URLs to the urlContext tool so the model knows which URLs to process
+  const tools: Tool[] = urls.length > 0 ? [{ urlContext: { urls: urls } }] : [];
   
   return { fullPrompt, tools };
 }
