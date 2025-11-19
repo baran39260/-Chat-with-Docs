@@ -18,6 +18,7 @@ interface ChatInterfaceProps {
   onSuggestedQueryClick?: (query: string) => void;
   isFetchingSuggestions?: boolean;
   onToggleSidebar?: () => void;
+  inputDisabled?: boolean;
 }
 
 const ChatInterface: React.FC<ChatInterfaceProps> = ({ 
@@ -29,24 +30,54 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
   onSuggestedQueryClick,
   isFetchingSuggestions,
   onToggleSidebar,
+  inputDisabled = false,
 }) => {
   const [userQuery, setUserQuery] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
-  useEffect(scrollToBottom, [messages]);
+  // Scroll when messages change or when suggestion UI state changes
+  useEffect(scrollToBottom, [messages, isFetchingSuggestions, initialQuerySuggestions]);
+
+  // Global keyboard shortcut (Cmd+K or Ctrl+K) to focus input
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Check for Cmd+K (Mac) or Ctrl+K (Windows/Linux)
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        // Prevent default browser behavior (like search bar focus in some browsers)
+        e.preventDefault();
+        // Only focus if input is not disabled
+        if (!inputDisabled && !isLoading) {
+          textareaRef.current?.focus();
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [inputDisabled, isLoading]);
 
   const handleSend = () => {
-    if (userQuery.trim() && !isLoading) {
+    if (userQuery.trim() && !isLoading && !inputDisabled) {
       onSendMessage(userQuery.trim());
       setUserQuery('');
     }
   };
 
-  const showSuggestions = initialQuerySuggestions && initialQuerySuggestions.length > 0 && messages.filter(m => m.sender !== MessageSender.SYSTEM).length <= 1;
+  // Check if there are any user messages to determine if we are in the "initial" state
+  const hasUserMessages = messages.some(m => m.sender === MessageSender.USER);
+  const showSuggestions = initialQuerySuggestions && initialQuerySuggestions.length > 0 && !hasUserMessages && !inputDisabled;
+
+  const getPlaceholder = () => {
+    if (inputDisabled) return "Configuration required (see above)";
+    if (isLoading) return "AI is thinking...";
+    if (isFetchingSuggestions) return "Loading suggestions...";
+    return placeholderText || "Ask about the documents...";
+  };
 
   return (
     <div className="flex flex-col h-full bg-white dark:bg-[#1E1E1E] rounded-xl shadow-md border border-gray-200 dark:border-[rgba(255,255,255,0.05)]">
@@ -63,7 +94,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
           )}
           <div>
             <h2 className="text-xl font-semibold text-gray-800 dark:text-[#E2E2E2]">Documentation Browser</h2>
-            {placeholderText && messages.filter(m => m.sender !== MessageSender.SYSTEM).length === 0 && (
+            {placeholderText && !hasUserMessages && (
                <p className="text-xs text-gray-500 dark:text-[#A8ABB4] mt-1 max-w-md truncate" title={placeholderText}>{placeholderText}</p>
             )}
           </div>
@@ -78,19 +109,20 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
             <MessageItem key={msg.id} message={msg} />
           ))}
           
-          {isFetchingSuggestions && (
-              <div className="flex justify-center items-center p-3">
-                  <div className="flex items-center space-x-1.5 text-gray-500 dark:text-[#A8ABB4]">
-                      <div className="w-1.5 h-1.5 bg-current rounded-full animate-bounce [animation-delay:-0.3s]"></div>
-                      <div className="w-1.5 h-1.5 bg-current rounded-full animate-bounce [animation-delay:-0.15s]"></div>
-                      <div className="w-1.5 h-1.5 bg-current rounded-full animate-bounce"></div>
-                      <span className="text-sm">Fetching suggestions...</span>
-                  </div>
-              </div>
+          {isFetchingSuggestions && !hasUserMessages && (
+             <div className="my-3 px-1 animate-in fade-in duration-500">
+                <p className="text-xs text-gray-400 dark:text-gray-600 mb-2 font-medium animate-pulse">Generating suggestions...</p>
+                <div className="flex flex-wrap gap-2">
+                   <div className="h-7 w-32 bg-gray-200 dark:bg-white/5 rounded-full animate-pulse"></div>
+                   <div className="h-7 w-24 bg-gray-200 dark:bg-white/5 rounded-full animate-pulse"></div>
+                   <div className="h-7 w-40 bg-gray-200 dark:bg-white/5 rounded-full animate-pulse"></div>
+                   <div className="h-7 w-28 bg-gray-200 dark:bg-white/5 rounded-full animate-pulse delay-75"></div>
+                </div>
+             </div>
           )}
 
           {showSuggestions && onSuggestedQueryClick && (
-            <div className="my-3 px-1">
+            <div className="my-3 px-1 animate-in fade-in slide-in-from-bottom-2 duration-300">
               <p className="text-xs text-gray-500 dark:text-[#A8ABB4] mb-1.5 font-medium">Or try one of these: </p>
               <div className="flex flex-wrap gap-1.5">
                 {initialQuerySuggestions.map((suggestion, index) => (
@@ -112,12 +144,13 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
       <div className="p-4 border-t border-gray-200 dark:border-[rgba(255,255,255,0.05)] bg-white dark:bg-[#1E1E1E] rounded-b-xl">
         <div className="flex items-center gap-2">
           <textarea
+            ref={textareaRef}
             value={userQuery}
             onChange={(e) => setUserQuery(e.target.value)}
-            placeholder="Ask about the documents..."
-            className="flex-grow h-8 min-h-[32px] py-1.5 px-2.5 border border-gray-300 dark:border-[rgba(255,255,255,0.1)] bg-gray-50 dark:bg-[#2C2C2C] text-gray-800 dark:text-[#E2E2E2] placeholder-gray-400 dark:placeholder-[#777777] rounded-lg focus:ring-1 focus:ring-blue-500 dark:focus:ring-white/20 focus:border-blue-500 dark:focus:border-white/20 transition-shadow resize-none text-sm"
+            placeholder={getPlaceholder()}
+            className="flex-grow h-8 min-h-[32px] py-1.5 px-2.5 border border-gray-300 dark:border-[rgba(255,255,255,0.1)] bg-gray-50 dark:bg-[#2C2C2C] text-gray-800 dark:text-[#E2E2E2] placeholder-gray-400 dark:placeholder-[#777777] rounded-lg focus:ring-1 focus:ring-blue-500 dark:focus:ring-white/20 focus:border-blue-500 dark:focus:border-white/20 transition-shadow resize-none text-sm disabled:opacity-60 disabled:cursor-not-allowed"
             rows={1}
-            disabled={isLoading || isFetchingSuggestions}
+            disabled={isLoading || inputDisabled}
             onKeyPress={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
@@ -127,7 +160,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
           />
           <button
             onClick={handleSend}
-            disabled={isLoading || isFetchingSuggestions || !userQuery.trim()}
+            disabled={isLoading || !userQuery.trim() || inputDisabled}
             className="h-8 w-8 p-1.5 bg-gray-800 hover:bg-gray-900 text-white dark:bg-white/[.12] dark:hover:bg-white/20 dark:text-white rounded-lg transition-colors disabled:bg-gray-300 dark:disabled:bg-[#4A4A4A] disabled:text-gray-500 dark:disabled:text-[#777777] flex items-center justify-center flex-shrink-0"
             aria-label="Send message"
           >

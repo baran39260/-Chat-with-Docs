@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
 */
 
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { ChatMessage, MessageSender, KnowledgeGroup, KnowledgeItem } from './types';
 import { generateContentWithKnowledgeContext, getInitialSuggestions } from './services/geminiService';
 import KnowledgeBaseManager from './components/KnowledgeBaseManager';
@@ -93,6 +93,9 @@ const App: React.FC = () => {
   
   const [knowledgeGroups, setKnowledgeGroups] = useState<KnowledgeGroup[]>(initialGroups);
   const [activeKnowledgeGroupId, setActiveKnowledgeGroupId] = useState<string>(initialActiveId);
+  // New state to control whether we chat with the active group or all groups
+  const [chatScope, setChatScope] = useState<'current' | 'all'>('current');
+
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
@@ -100,10 +103,42 @@ const App: React.FC = () => {
   const [isFetchingSuggestions, setIsFetchingSuggestions] = useState(false);
   const [initialQuerySuggestions, setInitialQuerySuggestions] = useState<string[]>([]);
   
+  // Ref to track previous context to prevent unnecessary chat resets in 'all' mode
+  const prevContextRef = useRef<{ scope: 'current' | 'all', groupId: string }>({ scope: 'current', groupId: initialActiveId });
+
   const MAX_ITEMS = 20;
 
+  // The items shown in the sidebar manager (always the active group)
   const activeGroup = knowledgeGroups.find(group => group.id === activeKnowledgeGroupId);
-  const currentKnowledgeItems = activeGroup ? activeGroup.items : [];
+  const currentGroupItems = activeGroup ? activeGroup.items : [];
+  
+  // The items sent to the AI context (depends on chatScope)
+  const contextItems = useMemo(() => {
+    if (chatScope === 'current') {
+      return currentGroupItems;
+    } else {
+      // Aggregate items from ALL groups
+      const allItems = knowledgeGroups.flatMap(g => g.items);
+      
+      // Simple deduplication for URLs to save context window
+      const uniqueItems: KnowledgeItem[] = [];
+      const seenUrls = new Set<string>();
+      
+      for (const item of allItems) {
+        if (item.type === 'url') {
+          if (!seenUrls.has(item.value)) {
+            seenUrls.add(item.value);
+            uniqueItems.push(item);
+          }
+        } else {
+          // Always add files (assuming unique names/content, or simply allow dupes if diff groups have same file)
+          uniqueItems.push(item);
+        }
+      }
+      return uniqueItems;
+    }
+  }, [chatScope, currentGroupItems, knowledgeGroups]);
+
   
   useEffect(() => {
     try {
@@ -118,22 +153,55 @@ const App: React.FC = () => {
 
    useEffect(() => {
     const apiKey = process.env.API_KEY;
-    const currentActiveGroup = knowledgeGroups.find(group => group.id === activeKnowledgeGroupId);
-    const welcomeMessageText = !apiKey 
-        ? 'ERROR: Gemini API Key (process.env.API_KEY) is not configured. Please set this environment variable to use the application.'
-        : `Welcome to Documentation Browser! You're currently browsing content from: "${currentActiveGroup?.name || 'None'}". Just ask me questions, or try one of the suggestions below to get started`;
     
+    if (!apiKey) {
+       setChatMessages([{
+        id: `system-error-api-key-${Date.now()}`,
+        text: '### ⚠️ Configuration Error\n\nThe `API_KEY` environment variable is missing.\n\nPlease set `process.env.API_KEY` with your Gemini API key to use this application.',
+        sender: MessageSender.SYSTEM,
+        timestamp: new Date(),
+      }]);
+      return;
+    }
+
+    // Determine the effective context ID.
+    // If scope is 'all', the context is global (or dependent on knowledgeGroups length), not specific to activeGroupId.
+    // If scope is 'current', context is specific to activeGroupId.
+    const isAllScope = chatScope === 'all';
+    const currentContextId = isAllScope ? 'all-groups-context' : activeKnowledgeGroupId;
+    const prevContextId = isAllScope ? 'all-groups-context' : prevContextRef.current.groupId;
+    
+    const hasScopeChanged = prevContextRef.current.scope !== chatScope;
+    const hasContextChanged = currentContextId !== prevContextId;
+
+    // Update ref
+    prevContextRef.current = { scope: chatScope, groupId: activeKnowledgeGroupId };
+
+    // If we are in 'all' mode and only the active group changed (for management), DO NOT reset the chat.
+    if (isAllScope && !hasScopeChanged && !hasContextChanged) {
+       return;
+    }
+
+    const currentActiveGroup = knowledgeGroups.find(group => group.id === activeKnowledgeGroupId);
+    const groupName = chatScope === 'all' 
+      ? `All Knowledge Groups (${knowledgeGroups.length} groups)` 
+      : (currentActiveGroup?.name || 'None');
+      
+    const welcomeMessageText = `Welcome to Documentation Browser! You're currently browsing content from: **${groupName}**.\n\nJust ask me questions, or try one of the suggestions below to get started`;
+    
+    // Reset chat with new welcome message
     setChatMessages([{
-      id: `system-welcome-${activeKnowledgeGroupId}-${Date.now()}`,
+      id: `system-welcome-${currentContextId}-${Date.now()}`,
       text: welcomeMessageText,
       sender: MessageSender.SYSTEM,
       timestamp: new Date(),
     }]);
-  }, [activeKnowledgeGroupId, knowledgeGroups]); 
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeKnowledgeGroupId, chatScope, knowledgeGroups.length]); 
 
 
-  const fetchAndSetInitialSuggestions = useCallback(async (currentItems: KnowledgeItem[]) => {
-    if (currentItems.length === 0) {
+  const fetchAndSetInitialSuggestions = useCallback(async (itemsForSuggestions: KnowledgeItem[]) => {
+    if (itemsForSuggestions.length === 0) {
       setInitialQuerySuggestions([]);
       return;
     }
@@ -142,7 +210,7 @@ const App: React.FC = () => {
     setInitialQuerySuggestions([]); 
 
     try {
-      const response = await getInitialSuggestions(currentItems); 
+      const response = await getInitialSuggestions(itemsForSuggestions); 
       let suggestionsArray: string[] = [];
       if (response.text) {
         try {
@@ -164,7 +232,8 @@ const App: React.FC = () => {
           setChatMessages(prev => [...prev, { id: `sys-err-suggestion-parse-${Date.now()}`, text: "Error parsing suggestions from AI.", sender: MessageSender.SYSTEM, timestamp: new Date() }]);
         }
       }
-      setInitialQuerySuggestions(suggestionsArray.slice(0, 4)); 
+      // Increased limit from 4 to 10 to show more suggestions
+      setInitialQuerySuggestions(suggestionsArray.slice(0, 10)); 
     } catch (e: any) {
       const errorMessage = e.message || 'Failed to fetch initial suggestions.';
       setChatMessages(prev => [...prev, { id: `sys-err-suggestion-fetch-${Date.now()}`, text: `Error fetching suggestions: ${errorMessage}`, sender: MessageSender.SYSTEM, timestamp: new Date() }]);
@@ -174,12 +243,12 @@ const App: React.FC = () => {
   }, []); 
 
   useEffect(() => {
-    if (currentKnowledgeItems.length > 0 && process.env.API_KEY) { 
-        fetchAndSetInitialSuggestions(currentKnowledgeItems);
+    if (contextItems.length > 0 && process.env.API_KEY) { 
+        fetchAndSetInitialSuggestions(contextItems);
     } else {
         setInitialQuerySuggestions([]); 
     }
-  }, [currentKnowledgeItems, fetchAndSetInitialSuggestions]); 
+  }, [contextItems, fetchAndSetInitialSuggestions]); 
 
 
   const handleAddItem = (item: KnowledgeItem) => {
@@ -187,9 +256,6 @@ const App: React.FC = () => {
       prevGroups.map(group => {
         if (group.id === activeKnowledgeGroupId) {
           if (group.items.length < MAX_ITEMS) {
-            // FIX: The original duplicate check used a ternary operator that confused TypeScript's type narrowing.
-            // This led to an error when trying to access `.name` on a URL-type item.
-            // The logic is replaced with explicit, type-safe checks.
             const isDuplicate = group.items.some(i => {
               if (i.type !== item.type) return false;
               if (i.type === 'url' && item.type === 'url') {
@@ -262,6 +328,8 @@ const App: React.FC = () => {
     };
     setKnowledgeGroups(prev => [...prev, newGroup]);
     setActiveKnowledgeGroupId(newGroup.id);
+    // Automatically switch to 'current' scope when creating a new group so user can focus on it
+    setChatScope('current');
   };
 
   const handleRemoveGroup = (groupIdToRemove: string) => {
@@ -321,13 +389,13 @@ const App: React.FC = () => {
 
 
   const handleSendMessage = async (query: string) => {
-    if (!query.trim() || isLoading || isFetchingSuggestions) return;
+    if (!query.trim() || isLoading) return;
 
     const apiKey = process.env.API_KEY;
     if (!apiKey) {
        setChatMessages(prev => [...prev, {
         id: `error-apikey-${Date.now()}`,
-        text: 'ERROR: API Key (process.env.API_KEY) is not configured. Please set it up to send messages.',
+        text: '### ⚠️ Configuration Error\n\nPlease configure `process.env.API_KEY` to send messages.',
         sender: MessageSender.SYSTEM,
         timestamp: new Date(),
       }]);
@@ -355,11 +423,18 @@ const App: React.FC = () => {
     setChatMessages(prevMessages => [...prevMessages, userMessage, modelPlaceholderMessage]);
 
     try {
-      const response = await generateContentWithKnowledgeContext(query, currentKnowledgeItems);
+      // Use contextItems (which respects chatScope) instead of currentGroupItems
+      const response = await generateContentWithKnowledgeContext(query, contextItems);
       setChatMessages(prevMessages =>
         prevMessages.map(msg =>
           msg.id === modelPlaceholderMessage.id
-            ? { ...modelPlaceholderMessage, text: response.text || "I received an empty response.", isLoading: false, urlContext: response.urlContextMetadata }
+            ? { 
+                ...modelPlaceholderMessage, 
+                text: response.text || "I received an empty response.", 
+                isLoading: false, 
+                urlContext: response.urlContextMetadata,
+                groundingMetadata: response.groundingMetadata
+              }
             : msg
         )
       );
@@ -381,9 +456,17 @@ const App: React.FC = () => {
     handleSendMessage(query);
   };
   
-  const chatPlaceholder = currentKnowledgeItems.length > 0 
-    ? `Ask questions about "${activeGroup?.name || 'current documents'}"...`
-    : "Add documents to the knowledge base to enable chat.";
+  // Dynamic placeholder based on scope and content
+  const chatPlaceholder = useMemo(() => {
+    if (chatScope === 'all') {
+      return `Ask questions about all ${knowledgeGroups.length} knowledge groups...`;
+    }
+    return currentGroupItems.length > 0 
+      ? `Ask questions about "${activeGroup?.name || 'current documents'}"...`
+      : "Add documents to this group to enable chat.";
+  }, [chatScope, knowledgeGroups.length, currentGroupItems.length, activeGroup?.name]);
+    
+  const isApiKeyMissing = !process.env.API_KEY;
 
   return (
     <div 
@@ -406,7 +489,7 @@ const App: React.FC = () => {
           ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'}
         `}>
           <KnowledgeBaseManager
-            items={currentKnowledgeItems}
+            items={currentGroupItems} // Always show items for the ACTIVE group for management purposes
             onAddItem={handleAddItem}
             onAddFiles={handleAddFiles}
             onRemoveItem={handleRemoveItem}
@@ -418,6 +501,8 @@ const App: React.FC = () => {
             onAddGroup={handleAddGroup}
             onRemoveGroup={handleRemoveGroup}
             onMoveItemsAndDeleteGroup={handleMoveItemsAndDeleteGroup}
+            chatScope={chatScope}
+            onSetChatScope={setChatScope}
           />
         </div>
 
@@ -432,6 +517,7 @@ const App: React.FC = () => {
             onSuggestedQueryClick={handleSuggestedQueryClick}
             isFetchingSuggestions={isFetchingSuggestions}
             onToggleSidebar={() => setIsSidebarOpen(true)}
+            inputDisabled={isApiKeyMissing}
           />
         </div>
       </div>

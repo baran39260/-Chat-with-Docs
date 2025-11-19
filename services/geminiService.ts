@@ -5,7 +5,7 @@
 
 
 import { GoogleGenAI, GenerateContentResponse, Tool, HarmCategory, HarmBlockThreshold, Content } from "@google/genai";
-import { UrlContextMetadataItem, KnowledgeItem } from '../types';
+import { UrlContextMetadataItem, KnowledgeItem, GroundingMetadata } from '../types';
 
 let ai: GoogleGenAI;
 
@@ -34,6 +34,7 @@ const safetySettings = [
 interface GeminiResponse {
   text: string;
   urlContextMetadata?: UrlContextMetadataItem[];
+  groundingMetadata?: GroundingMetadata;
 }
 
 const buildPromptWithContext = (prompt: string, items: KnowledgeItem[]): { fullPrompt: string, tools: Tool[] } => {
@@ -64,8 +65,16 @@ const buildPromptWithContext = (prompt: string, items: KnowledgeItem[]): { fullP
       fullPrompt = contextPrompt + prompt;
   }
 
-  // Pass the URLs to the urlContext tool so the model knows which URLs to process
-  const tools: Tool[] = urls.length > 0 ? [{ urlContext: { urls: urls } }] : [];
+  // Configure tools:
+  // 1. googleSearch: Always enable to allow the model to find up-to-date info.
+  // 2. urlContext: Enable if URLs are provided in the knowledge base.
+  const tools: Tool[] = [
+    { googleSearch: {} }
+  ];
+
+  if (urls.length > 0) {
+    tools.push({ urlContext: { urls: urls } });
+  }
   
   return { fullPrompt, tools };
 }
@@ -100,18 +109,27 @@ export const generateContentWithKnowledgeContext = async (
       }
     }
 
-    const text = response.text;
+    const text = response.text || "";
     const candidate = response.candidates?.[0];
     let extractedUrlContextMetadata: UrlContextMetadataItem[] | undefined = undefined;
+    let extractedGroundingMetadata: GroundingMetadata | undefined = undefined;
 
+    // Extract URL Context Metadata
     if (candidate && candidate.urlContextMetadata && candidate.urlContextMetadata.urlMetadata) {
       console.log("Raw candidate.urlContextMetadata.urlMetadata from API/SDK:", JSON.stringify(candidate.urlContextMetadata.urlMetadata, null, 2));
       extractedUrlContextMetadata = candidate.urlContextMetadata.urlMetadata as UrlContextMetadataItem[];
-    } else if (candidate && candidate.urlContextMetadata) {
-      console.warn("candidate.urlContextMetadata is present, but 'urlMetadata' field is missing or empty:", JSON.stringify(candidate.urlContextMetadata, null, 2));
     }
     
-    return { text, urlContextMetadata: extractedUrlContextMetadata };
+    // Extract Search Grounding Metadata
+    if (candidate && candidate.groundingMetadata) {
+      extractedGroundingMetadata = candidate.groundingMetadata as GroundingMetadata;
+    }
+    
+    return { 
+      text, 
+      urlContextMetadata: extractedUrlContextMetadata,
+      groundingMetadata: extractedGroundingMetadata 
+    };
 
   } catch (error) {
     console.error("Error calling Gemini API:", error);
@@ -164,7 +182,7 @@ export const getInitialSuggestions = async (items: KnowledgeItem[]): Promise<Gem
       urlContext = `Relevant URLs:\n${urls.join('\n')}`;
   }
   
-  const promptText = `Based on the content of the following documentation, provide 3-4 concise and actionable questions a developer might ask to explore these documents. These questions should be suitable as quick-start prompts. Return ONLY a JSON object with a key "suggestions" containing an array of these question strings. For example: {"suggestions": ["What are the rate limits?", "How do I get an API key?", "Explain model X."]}
+  const promptText = `Based on the content of the following documentation, provide 8-10 concise and actionable questions a developer might ask to explore these documents. These questions should be suitable as quick-start prompts. Return ONLY a JSON object with a key "suggestions" containing an array of these question strings. For example: {"suggestions": ["What are the rate limits?", "How do I get an API key?", "Explain model X."]}
 
 ${fileContext}${urlContext}`;
 
@@ -177,6 +195,7 @@ ${fileContext}${urlContext}`;
       config: {
         safetySettings: safetySettings,
         responseMimeType: "application/json",
+        // Note: googleSearch tool is NOT used here because it's incompatible with responseMimeType: "application/json"
       },
     });
 
@@ -188,7 +207,7 @@ ${fileContext}${urlContext}`;
       }
     }
 
-    const text = response.text;
+    const text = response.text || "";
     return { text };
 
   } catch (error) {

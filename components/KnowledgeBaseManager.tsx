@@ -4,15 +4,15 @@
 */
 
 import React, { useState } from 'react';
-import { Plus, Trash2, ChevronDown, X, FileText, Upload, Check, Search } from 'lucide-react';
+import { Plus, Trash2, ChevronDown, X, FileText, Upload, Check, Search, Loader2, FileCode, File, FileImage, FileSpreadsheet, Globe, Layers } from 'lucide-react';
 import { KnowledgeGroup, KnowledgeItem } from '../types';
-import * as pdfjsLib from 'pdfjs-dist/build/pdf.mjs';
+import * as pdfjsLib from 'pdfjs-dist';
 
 // Set up the PDF.js worker to handle parsing in the background.
 // The worker is loaded from a CDN via esm.sh, as configured in index.html's importmap.
 // We provide the full URL to the worker script, using the same semver range
 // as the importmap to ensure version consistency between the library and the worker.
-pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://esm.sh/pdfjs-dist@^4.5.136/build/pdf.worker.mjs';
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://esm.sh/pdfjs-dist@4.5.136/build/pdf.worker.mjs';
 
 
 interface KnowledgeBaseManagerProps {
@@ -28,6 +28,8 @@ interface KnowledgeBaseManagerProps {
   onRemoveGroup: (id: string) => void;
   onMoveItemsAndDeleteGroup: (sourceId: string, destinationId: string) => void;
   onCloseSidebar?: () => void;
+  chatScope: 'current' | 'all';
+  onSetChatScope: (scope: 'current' | 'all') => void;
 }
 
 type DeleteModalState = 'hidden' | 'confirm-simple' | 'confirm-move';
@@ -45,12 +47,15 @@ const KnowledgeBaseManager: React.FC<KnowledgeBaseManagerProps> = ({
   onRemoveGroup,
   onMoveItemsAndDeleteGroup,
   onCloseSidebar,
+  chatScope,
+  onSetChatScope,
 }) => {
   const [currentUrlInput, setCurrentUrlInput] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [isAddingGroup, setIsAddingGroup] = useState(false);
   const [newGroupName, setNewGroupName] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
+  const [uploadingFiles, setUploadingFiles] = useState<{name: string}[]>([]);
   
   const [deleteModalState, setDeleteModalState] = useState<DeleteModalState>('hidden');
   const [moveTargetGroupId, setMoveTargetGroupId] = useState('');
@@ -93,12 +98,16 @@ const KnowledgeBaseManager: React.FC<KnowledgeBaseManagerProps> = ({
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     setError(null);
     const files = event.target.files;
-    if (!files) return;
+    if (!files || files.length === 0) return;
 
     if (items.length + files.length > maxItems) {
       setError(`Cannot add ${files.length} files. Maximum of ${maxItems} items reached.`);
+      event.target.value = '';
       return;
     }
+
+    // Set uploading state
+    setUploadingFiles(Array.from(files).map(f => ({ name: f.name })));
 
     const filePromises = Array.from(files).map((file: File) => {
       return new Promise<{ name: string; content: string; mimeType: string }>((resolve, reject) => {
@@ -116,58 +125,65 @@ const KnowledgeBaseManager: React.FC<KnowledgeBaseManagerProps> = ({
                   const textContent = await page.getTextContent();
                   let pageText = '';
 
+                  // Refined PDF Parsing Logic
                   if (textContent.items.length > 0) {
-                      const lines: any[][] = [];
-                      let currentLine: any[] = [];
-                      // Group items into lines based on hasEOL
-                      textContent.items.forEach((item: any) => {
-                          currentLine.push(item);
-                          if (item.hasEOL) {
-                              if (currentLine.map(i => i.str).join('').trim()) {
-                                  lines.push(currentLine);
-                              }
-                              currentLine = [];
+                      const items = textContent.items as any[];
+                      
+                      // Group items into visual lines based on Y-coordinate
+                      // Using a tolerance of 50% of item height to group aligned text
+                      const lines: { y: number; height: number; items: any[] }[] = [];
+                      
+                      items.forEach((item) => {
+                          const str = item.str;
+                          if (!str || !str.trim()) return; // Skip empty/whitespace items
+
+                          const y = item.transform[5]; // translateY
+                          const height = item.height || 10;
+                          
+                          // Find line bucket
+                          const line = lines.find(l => Math.abs(l.y - y) < (height * 0.5));
+                          
+                          if (line) {
+                              line.items.push(item);
+                          } else {
+                              lines.push({ y, height, items: [item] });
                           }
                       });
-                      if (currentLine.length > 0 && currentLine.map(i => i.str).join('').trim()) {
-                          lines.push(currentLine);
-                      }
-
-                      if (lines.length > 0) {
-                          pageText = lines[0].map(item => item.str).join(' ').trim();
-                          for (let j = 1; j < lines.length; j++) {
-                              const prevLineItems = lines[j-1];
-                              const currentLineItems = lines[j];
+                      
+                      // Sort lines top-to-bottom (PDF coordinate origin is bottom-left, so higher Y is top)
+                      lines.sort((a, b) => b.y - a.y);
+                      
+                      lines.forEach((line, index) => {
+                          // Sort items left-to-right
+                          line.items.sort((a, b) => a.transform[4] - b.transform[4]);
+                          
+                          const lineStr = line.items.map(i => i.str).join(' ').replace(/\s+/g, ' ').trim();
+                          
+                          if (index > 0) {
+                              const prevLine = lines[index - 1];
+                              const verticalGap = prevLine.y - line.y;
                               
-                              const lastItemOfPrevLine = prevLineItems[prevLineItems.length - 1];
-                              const firstItemOfCurrentLine = currentLineItems[0];
-              
-                              const prevY = lastItemOfPrevLine.transform[5];
-                              const currentY = firstItemOfCurrentLine.transform[5];
-                              const prevHeight = lastItemOfPrevLine.height;
-              
-                              const verticalGap = Math.abs(prevY - currentY);
-                              
-                              // Heuristic for paragraph break: gap is larger than 1.5x the line height
-                              if (verticalGap > prevHeight * 1.5) {
+                              // Threshold for paragraph break (1.6x line height)
+                              if (verticalGap > prevLine.height * 1.6) {
                                   pageText += '\n\n';
                               } else {
                                   pageText += '\n';
                               }
-                              pageText += currentLineItems.map(item => item.str).join(' ').trim();
                           }
-                      }
+                          pageText += lineStr;
+                      });
                   }
                   
                   fullText += pageText + '\n\n';
                 }
                 resolve({ name: file.name, content: fullText.trim(), mimeType: file.type });
-              } catch (pdfError: any) {
-                console.error(`Error parsing PDF "${file.name}":`, pdfError);
+              } catch (e: unknown) {
+                const pdfError = e as { name?: string; message?: string };
+                console.error(`Error parsing PDF "${file.name}":`, e);
                 let message = `Failed to parse PDF file: ${file.name}.`;
-                if (pdfError.name === 'PasswordException') {
+                if (pdfError?.name === 'PasswordException') {
                     message = `Could not open "${file.name}". The PDF is password-protected.`;
-                } else if (pdfError.name === 'InvalidPDFException') {
+                } else if (pdfError?.name === 'InvalidPDFException') {
                     message = `Could not open "${file.name}". The file appears to be corrupted or is not a valid PDF.`;
                 } else {
                     message = `An unexpected error occurred while processing "${file.name}". It might be an unsupported format.`;
@@ -202,9 +218,13 @@ const KnowledgeBaseManager: React.FC<KnowledgeBaseManagerProps> = ({
       .then(fileData => {
         onAddFiles(fileData);
       })
-      .catch(err => {
+      .catch((err: unknown) => {
         console.error("Error reading files:", err);
-        setError(err.message || "An error occurred while reading the files.");
+        const errorMessage = (err instanceof Error) ? err.message : "An error occurred while reading the files.";
+        setError(errorMessage);
+      })
+      .finally(() => {
+        setUploadingFiles([]);
       });
     
     event.target.value = '';
@@ -406,7 +426,7 @@ const KnowledgeBaseManager: React.FC<KnowledgeBaseManagerProps> = ({
   };
 
   return (
-    <div className="p-4 bg-white dark:bg-[#1E1E1E] shadow-md rounded-xl h-full flex flex-col border border-gray-200 dark:border-[rgba(255,255,255,0.05)]">
+    <div className="p-4 bg-white dark:bg-[#1E1E1E] shadow-md rounded-xl h-full flex flex-col border border-gray-200 dark:border-[rgba(255,255,255,0.05)] overflow-hidden">
       <div className="flex items-center justify-between mb-3">
         <h2 className="text-xl font-semibold text-gray-800 dark:text-[#E2E2E2]">Knowledge Base</h2>
         {onCloseSidebar && (
@@ -420,42 +440,72 @@ const KnowledgeBaseManager: React.FC<KnowledgeBaseManagerProps> = ({
         )}
       </div>
       
-      <div className="mb-3">
-        <label htmlFor="url-group-select-kb" className="block text-sm font-medium text-gray-500 dark:text-[#A8ABB4] mb-1">
-          Active Knowledge Group
-        </label>
-        <div className="flex items-center gap-2">
-          <div className="relative flex-grow">
-            <select
-              id="url-group-select-kb"
-              value={activeKnowledgeGroupId}
-              onChange={(e) => onSetGroupId(e.target.value)}
-              disabled={isAddingGroup}
-              className="w-full h-8 py-1 pl-3 pr-8 appearance-none border border-gray-300 dark:border-[rgba(255,255,255,0.1)] bg-gray-100 dark:bg-[#2C2C2C] text-gray-800 dark:text-[#E2E2E2] rounded-md focus:ring-1 focus:ring-blue-500 dark:focus:ring-white/20 focus:border-blue-500 dark:focus:border-white/20 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+      <div className="mb-3 space-y-3">
+        <div>
+            <label htmlFor="url-group-select-kb" className="block text-sm font-medium text-gray-500 dark:text-[#A8ABB4] mb-1">
+            Active Group (for managing)
+            </label>
+            <div className="flex items-center gap-2">
+            <div className="relative flex-grow">
+                <div className="relative w-full">
+                   <select
+                    id="url-group-select-kb"
+                    value={activeKnowledgeGroupId}
+                    onChange={(e) => onSetGroupId(e.target.value)}
+                    disabled={isAddingGroup}
+                    className="w-full h-8 py-1 pl-3 pr-8 appearance-none border border-gray-300 dark:border-[rgba(255,255,255,0.1)] bg-gray-100 dark:bg-[#2C2C2C] text-gray-800 dark:text-[#E2E2E2] rounded-md focus:ring-1 focus:ring-blue-500 dark:focus:ring-white/20 focus:border-blue-500 dark:focus:border-white/20 text-sm disabled:opacity-50 disabled:cursor-not-allowed truncate"
+                    >
+                    {knowledgeGroups.map(group => (
+                        <option key={group.id} value={group.id}>
+                        {group.name}
+                        </option>
+                    ))}
+                    </select>
+                    <ChevronDown
+                    className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400 dark:text-[#A8ABB4] pointer-events-none"
+                    aria-hidden="true"
+                    />
+                </div>
+            </div>
+            <button
+                onClick={handleStartDelete}
+                disabled={knowledgeGroups.length <= 1 || isAddingGroup}
+                className="h-8 w-8 p-1.5 text-gray-500 dark:text-[#A8ABB4] hover:text-red-500 dark:hover:text-[#f87171] rounded-md hover:bg-red-500/10 dark:hover:bg-[rgba(255,0,0,0.1)] transition-colors disabled:text-gray-300 dark:disabled:text-[#4A4A4A] disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
+                aria-label="Delete active group"
+                title="Delete active group"
             >
-              {knowledgeGroups.map(group => (
-                <option key={group.id} value={group.id}>
-                  {group.name}
-                </option>
-              ))}
-            </select>
-            <ChevronDown
-              className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400 dark:text-[#A8ABB4] pointer-events-none"
-              aria-hidden="true"
-            />
-          </div>
-          <button
-            onClick={handleStartDelete}
-            disabled={knowledgeGroups.length <= 1 || isAddingGroup}
-            className="h-8 w-8 p-1.5 text-gray-500 dark:text-[#A8ABB4] hover:text-red-500 dark:hover:text-[#f87171] rounded-md hover:bg-red-500/10 dark:hover:bg-[rgba(255,0,0,0.1)] transition-colors disabled:text-gray-300 dark:disabled:text-[#4A4A4A] disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
-            aria-label="Delete active group"
-            title="Delete active group"
-          >
-            <Trash2 size={16} />
-          </button>
+                <Trash2 size={16} />
+            </button>
+            </div>
+        </div>
+
+        {/* Chat Scope Toggle */}
+        <div className="bg-gray-50 dark:bg-[#252525] p-1 rounded-lg flex text-xs font-medium border border-gray-200 dark:border-[rgba(255,255,255,0.05)]">
+            <button
+                onClick={() => onSetChatScope('current')}
+                className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-md transition-all ${
+                    chatScope === 'current' 
+                    ? 'bg-white dark:bg-[#3a3a3a] text-blue-600 dark:text-blue-400 shadow-sm ring-1 ring-gray-200 dark:ring-white/10' 
+                    : 'text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200'
+                }`}
+            >
+                <Layers size={14} />
+                <span>Current Group</span>
+            </button>
+            <button
+                onClick={() => onSetChatScope('all')}
+                className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-md transition-all ${
+                    chatScope === 'all' 
+                    ? 'bg-white dark:bg-[#3a3a3a] text-blue-600 dark:text-blue-400 shadow-sm ring-1 ring-gray-200 dark:ring-white/10' 
+                    : 'text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200'
+                }`}
+            >
+                <Globe size={14} />
+                <span>All Groups</span>
+            </button>
         </div>
         
-        <div className="mt-2">
+        <div className="mt-1">
           {isAddingGroup ? (
             <div className="flex items-center gap-2">
               <input
@@ -496,14 +546,14 @@ const KnowledgeBaseManager: React.FC<KnowledgeBaseManagerProps> = ({
         </div>
       </div>
 
-      <fieldset className="flex flex-col flex-grow min-h-0">
-        <div className="flex items-center gap-2 mb-1">
+      <div className="flex flex-col flex-grow min-h-0 overflow-hidden">
+        <div className="flex items-center gap-2 mb-1 flex-shrink-0">
           <input
             type="url"
             value={currentUrlInput}
             onChange={(e) => setCurrentUrlInput(e.target.value)}
             placeholder="Add a URL..."
-            className="flex-grow h-8 py-1 px-2.5 border border-gray-300 dark:border-[rgba(255,255,255,0.1)] bg-gray-50 dark:bg-[#2C2C2C] text-gray-800 dark:text-[#E2E2E2] placeholder-gray-400 dark:placeholder-[#777777] rounded-lg focus:ring-1 focus:ring-blue-500 dark:focus:ring-white/20 focus:border-blue-500 dark:focus:border-white/20 transition-shadow text-sm"
+            className="flex-grow h-8 py-1 px-2.5 border border-gray-300 dark:border-[rgba(255,255,255,0.1)] bg-gray-50 dark:bg-[#2C2C2C] text-gray-800 dark:text-[#E2E2E2] placeholder-gray-400 dark:placeholder-[#777777] rounded-lg focus:ring-1 focus:ring-blue-500 dark:focus:ring-white/20 focus:border-blue-500 dark:focus:border-white/20 transition-shadow text-sm min-w-0"
             onKeyPress={(e) => e.key === 'Enter' && handleAddUrl()}
             aria-label="Add URL to knowledge base"
           />
@@ -516,7 +566,7 @@ const KnowledgeBaseManager: React.FC<KnowledgeBaseManagerProps> = ({
             <Plus size={16} />
           </button>
         </div>
-        <div className="flex items-center gap-2 mb-3">
+        <div className="flex items-center gap-2 mb-3 flex-shrink-0">
           <input 
             type="file" 
             id="file-upload" 
@@ -524,22 +574,22 @@ const KnowledgeBaseManager: React.FC<KnowledgeBaseManagerProps> = ({
             className="hidden"
             onChange={handleFileChange}
             accept=".md,.mdx,.txt,.pdf"
-            disabled={items.length >= maxItems}
+            disabled={items.length >= maxItems || uploadingFiles.length > 0}
           />
           <label 
              htmlFor="file-upload"
-             className={`w-full text-center h-8 px-3 py-1.5 flex items-center justify-center gap-2 text-sm rounded-lg transition-colors ${items.length >= maxItems ? 'bg-gray-300 dark:bg-[#4A4A4A] text-gray-500 dark:text-[#777777] cursor-not-allowed' : 'bg-gray-800 hover:bg-gray-900 text-white dark:bg-white/[.12] dark:hover:bg-white/20 dark:text-white cursor-pointer'}`}
-             aria-disabled={items.length >= maxItems}
+             className={`w-full text-center h-8 px-3 py-1.5 flex items-center justify-center gap-2 text-sm rounded-lg transition-colors ${items.length >= maxItems || uploadingFiles.length > 0 ? 'bg-gray-300 dark:bg-[#4A4A4A] text-gray-500 dark:text-[#777777] cursor-not-allowed' : 'bg-gray-800 hover:bg-gray-900 text-white dark:bg-white/[.12] dark:hover:bg-white/20 dark:text-white cursor-pointer'}`}
+             aria-disabled={items.length >= maxItems || uploadingFiles.length > 0}
           >
-            <Upload size={14} />
-            Upload Local Files
+            {uploadingFiles.length > 0 ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}
+            {uploadingFiles.length > 0 ? 'Uploading...' : 'Upload Local Files'}
           </label>
         </div>
 
         {error && <p className="text-xs text-red-500 dark:text-[#f87171] mb-2">{error}</p>}
         {items.length >= maxItems && <p className="text-xs text-amber-500 dark:text-[#fbbf24] mb-2">Maximum {maxItems} items reached for this group.</p>}
         
-        <div className="relative mb-3">
+        <div className="relative mb-3 flex-shrink-0">
           <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 dark:text-[#777777]" aria-hidden="true" />
           <input
             type="search"
@@ -551,19 +601,30 @@ const KnowledgeBaseManager: React.FC<KnowledgeBaseManagerProps> = ({
           />
         </div>
 
-        <div className="flex-grow overflow-y-auto space-y-2 chat-container">
-          {items.length > 0 && filteredItems.length === 0 && (
+        <div className="flex-grow overflow-y-auto space-y-2 chat-container min-h-0">
+          {items.length > 0 && filteredItems.length === 0 && uploadingFiles.length === 0 && (
             <p className="text-gray-500 dark:text-[#777777] text-center py-3 text-sm">No documents match your search.</p>
           )}
-          {items.length === 0 && (
+          {items.length === 0 && uploadingFiles.length === 0 && (
             <p className="text-gray-500 dark:text-[#777777] text-center py-3 text-sm">Add documents to "{activeGroup?.name || 'this group'}" to start querying.</p>
           )}
+
+          {uploadingFiles.map((file, index) => (
+            <div key={`uploading-${index}`} className="flex items-center justify-between p-2.5 bg-gray-50 dark:bg-[#2C2C2C]/50 border border-gray-200 dark:border-[rgba(255,255,255,0.05)] rounded-lg opacity-70">
+                <div className="flex-1 flex items-center gap-2 min-w-0">
+                  <Loader2 size={16} className="text-blue-500 dark:text-blue-400 animate-spin flex-shrink-0" />
+                  <span className="text-xs text-gray-600 dark:text-gray-400 truncate italic flex-1">{file.name}</span>
+                </div>
+                <span className="text-[10px] text-gray-400 dark:text-gray-500 font-medium px-2">Processing...</span>
+            </div>
+          ))}
+
           {filteredItems.map((item, index) => (
             <div key={`${item.type}-${index}`} className="relative group">
-              <div className="flex items-center justify-between p-2.5 bg-gray-100 dark:bg-[#2C2C2C] border border-gray-200 dark:border-[rgba(255,255,255,0.05)] rounded-lg hover:shadow-sm transition-shadow">
-                <div className="flex items-center gap-2 min-w-0">
+              <div className="flex items-center justify-between p-2.5 bg-gray-100 dark:bg-[#2C2C2C] border border-gray-200 dark:border-[rgba(255,255,255,0.05)] rounded-lg hover:shadow-sm transition-shadow overflow-hidden">
+                <div className="flex-1 flex items-center gap-2 min-w-0 overflow-hidden">
                   {item.type === 'url' ? (
-                    <a href={item.value} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 text-xs text-blue-600 hover:underline dark:text-[#79B8FF] min-w-0" title={item.value}>
+                    <a href={item.value} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 text-xs text-blue-600 hover:underline dark:text-[#79B8FF] w-full min-w-0" title={item.value}>
                       <img
                         src={`https://www.google.com/s2/favicons?sz=16&domain_url=${encodeURIComponent(item.value)}`}
                         alt="Favicon"
@@ -571,16 +632,34 @@ const KnowledgeBaseManager: React.FC<KnowledgeBaseManagerProps> = ({
                         width="16"
                         height="16"
                       />
-                      <span className="truncate">{item.value}</span>
+                      <span className="truncate flex-1 min-w-0">{item.value}</span>
                     </a>
                   ) : (
                     <>
-                      {item.mimeType === 'application/pdf' ? (
-                        <FileText size={16} className="text-red-500 dark:text-red-400 flex-shrink-0"/>
-                      ) : (
-                        <FileText size={16} className="text-gray-400 dark:text-[#A8ABB4] flex-shrink-0"/>
-                      )}
-                      <span className="text-xs text-gray-800 dark:text-white truncate" title={item.name}>
+                      {(() => {
+                        const ext = item.name.split('.').pop()?.toLowerCase() || '';
+                        
+                        if (item.mimeType === 'application/pdf' || ext === 'pdf') {
+                          return <FileText size={16} className="text-red-500 dark:text-red-400 flex-shrink-0"/>;
+                        }
+                        if (['md', 'mdx'].includes(ext)) {
+                          return <FileCode size={16} className="text-blue-600 dark:text-blue-400 flex-shrink-0"/>;
+                        }
+                        if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'].includes(ext)) {
+                          return <FileImage size={16} className="text-purple-500 dark:text-purple-400 flex-shrink-0"/>;
+                        }
+                        if (['xlsx', 'xls', 'csv'].includes(ext)) {
+                          return <FileSpreadsheet size={16} className="text-green-600 dark:text-green-400 flex-shrink-0"/>;
+                        }
+                         if (['docx', 'doc'].includes(ext)) {
+                          return <FileText size={16} className="text-blue-700 dark:text-blue-300 flex-shrink-0"/>;
+                        }
+                        if (['pptx', 'ppt'].includes(ext)) {
+                           return <File size={16} className="text-orange-500 dark:text-orange-400 flex-shrink-0"/>;
+                        }
+                        return <File size={16} className="text-gray-400 dark:text-[#A8ABB4] flex-shrink-0"/>;
+                      })()}
+                      <span className="text-xs text-gray-800 dark:text-white truncate flex-1 min-w-0" title={item.name}>
                         {item.name}
                       </span>
                     </>
@@ -605,7 +684,7 @@ const KnowledgeBaseManager: React.FC<KnowledgeBaseManagerProps> = ({
             </div>
           ))}
         </div>
-      </fieldset>
+      </div>
       
       {renderDeleteModal()}
       {renderDeleteItemModal()}

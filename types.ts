@@ -14,6 +14,22 @@ export interface UrlContextMetadataItem {
   urlRetrievalStatus: string; // Changed from url_retrieval_status
 }
 
+export interface GroundingChunk {
+  web?: {
+    uri: string;
+    title: string;
+  };
+}
+
+export interface GroundingMetadata {
+  groundingChunks: GroundingChunk[];
+  groundingSupports?: any[];
+  webSearchQueries?: string[];
+  searchEntryPoint?: {
+    renderedContent: string;
+  };
+}
+
 export interface ChatMessage {
   id: string;
   text: string;
@@ -21,6 +37,7 @@ export interface ChatMessage {
   timestamp: Date;
   isLoading?: boolean;
   urlContext?: UrlContextMetadataItem[];
+  groundingMetadata?: GroundingMetadata;
 }
 
 export type KnowledgeItem =

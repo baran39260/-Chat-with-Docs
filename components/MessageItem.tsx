@@ -3,18 +3,25 @@
  * SPDX-License-Identifier: Apache-2.0
 */
 
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { marked } from 'marked';
 import hljs from 'highlight.js';
-import { Copy, Check } from 'lucide-react';
-import { ChatMessage, MessageSender, UrlContextMetadataItem } from '../types';
+import { Copy, Check, Search } from 'lucide-react';
+import { ChatMessage, MessageSender } from '../types';
+
+// --- Constants for Icons ---
+const COPY_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-copy"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></svg>`;
+const CHECK_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-check"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
 
 // --- Enhanced Code Block Renderer for `marked` ---
 
 const renderer = new marked.Renderer();
 
-renderer.code = function(code, lang) {
-  const language = hljs.getLanguage(lang) ? lang : 'plaintext';
+// Update signature to match marked v14+ where code receives an object
+// @ts-ignore - ignoring strict type check on the function signature to allow destructuring
+renderer.code = function({ text, lang }: { text: string; lang?: string }) {
+  const code = text;
+  const language = (lang && hljs.getLanguage(lang)) ? lang : 'plaintext';
   const langDisplay = language !== 'plaintext' ? language : '';
 
   // Highlight the code and split into lines
@@ -25,36 +32,16 @@ renderer.code = function(code, lang) {
   }
   const withLineElements = lines.map(line => `<span class="code-line">${line || '&nbsp;'}</span>`).join('');
 
-  // SVG icons for the copy button
-  const copyIcon = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-copy"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></svg>`;
-  const checkIcon = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-check"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
-  
-  // On-click handler for the copy button
-  const onclickHandler = `
-    const button = this;
-    const wrapper = button.closest('.code-block-wrapper');
-    const codeToCopy = wrapper.querySelector('.code-raw').value;
-    navigator.clipboard.writeText(codeToCopy).then(() => {
-        button.innerHTML = \`${checkIcon}\`;
-        button.disabled = true;
-        setTimeout(() => {
-            button.innerHTML = \`${copyIcon}\`;
-            button.disabled = false;
-        }, 2000);
-    }).catch(err => {
-        console.error('Failed to copy code: ', err);
-    });
-  `.replace(/\s*\n\s*/g, ''); // Minify for attribute
-
   // Store raw code in a hidden textarea for the copy function
+  // We escape it to prevent breaking HTML structure
   const escapedCodeForTextarea = code.replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
   return `
     <div class="code-block-wrapper">
         <div class="code-block-header">
             <span class="code-block-lang">${langDisplay}</span>
-            <button class="code-copy-btn" title="Copy code" onclick="${onclickHandler}">
-                ${copyIcon}
+            <button class="code-copy-btn" title="Copy code">
+                ${COPY_ICON_SVG}
             </button>
         </div>
         <pre><code class="hljs language-${language}">${withLineElements}</code></pre>
@@ -101,6 +88,38 @@ const MessageItem: React.FC<MessageItemProps> = ({ message }) => {
   const [isCopied, setIsCopied] = useState(false);
   const isUser = message.sender === MessageSender.USER;
   const isModel = message.sender === MessageSender.MODEL;
+  const contentRef = useRef<HTMLDivElement>(null);
+
+  // Handle binding events to code block copy buttons
+  useEffect(() => {
+    const container = contentRef.current;
+    if (!container) return;
+
+    const handleCodeCopy = (e: Event) => {
+      const button = e.currentTarget as HTMLButtonElement;
+      const wrapper = button.closest('.code-block-wrapper');
+      if (!wrapper) return;
+      
+      const textarea = wrapper.querySelector('.code-raw') as HTMLTextAreaElement;
+      if (!textarea) return;
+
+      navigator.clipboard.writeText(textarea.value).then(() => {
+        button.innerHTML = CHECK_ICON_SVG;
+        button.disabled = true;
+        setTimeout(() => {
+            button.innerHTML = COPY_ICON_SVG;
+            button.disabled = false;
+        }, 2000);
+      }).catch(err => console.error('Failed to copy code:', err));
+    };
+
+    const buttons = container.querySelectorAll('.code-copy-btn');
+    buttons.forEach(btn => btn.addEventListener('click', handleCodeCopy));
+
+    return () => {
+      buttons.forEach(btn => btn.removeEventListener('click', handleCodeCopy));
+    };
+  }, [message.text]);
 
   const handleCopy = () => {
     if (isCopied || !message.text) return;
@@ -120,7 +139,7 @@ const MessageItem: React.FC<MessageItemProps> = ({ message }) => {
       // Use dark:prose-invert for automatic dark mode styling of markdown content
       const proseClasses = "prose prose-sm w-full min-w-0 prose-last:mb-0 dark:prose-invert";
       const rawMarkup = marked.parse(message.text || "") as string;
-      return <div className={proseClasses} dangerouslySetInnerHTML={{ __html: rawMarkup }} />;
+      return <div ref={contentRef} className={proseClasses} dangerouslySetInnerHTML={{ __html: rawMarkup }} />;
     }
 
     // Default rendering for system messages
@@ -156,15 +175,16 @@ const MessageItem: React.FC<MessageItemProps> = ({ message }) => {
             </button>
           )}
           {message.isLoading ? (
-            <div className="flex items-center space-x-1.5">
-              <div className={`w-1.5 h-1.5 rounded-full animate-bounce [animation-delay:-0.3s] ${isUser ? 'bg-white/70' : 'bg-gray-400 dark:bg-[#A8ABB4]'}`}></div>
-              <div className={`w-1.5 h-1.5 rounded-full animate-bounce [animation-delay:-0.15s] ${isUser ? 'bg-white/70' : 'bg-gray-400 dark:bg-[#A8ABB4]'}`}></div>
-              <div className={`w-1.5 h-1.5 rounded-full animate-bounce ${isUser ? 'bg-white/70' : 'bg-gray-400 dark:bg-[#A8ABB4]'}`}></div>
+            <div className="flex items-center space-x-1.5 h-6 pl-1">
+              <div className={`w-2.5 h-2.5 rounded-full animate-bounce [animation-delay:-0.3s] ${isUser ? 'bg-white' : 'bg-gray-500 dark:bg-[#A8ABB4]'}`}></div>
+              <div className={`w-2.5 h-2.5 rounded-full animate-bounce [animation-delay:-0.15s] ${isUser ? 'bg-white' : 'bg-gray-500 dark:bg-[#A8ABB4]'}`}></div>
+              <div className={`w-2.5 h-2.5 rounded-full animate-bounce ${isUser ? 'bg-white' : 'bg-gray-500 dark:bg-[#A8ABB4]'}`}></div>
             </div>
           ) : (
             renderMessageContent()
           )}
           
+          {/* URL Context Metadata Display */}
           {isModel && message.urlContext && message.urlContext.length > 0 && (
             <div className="pt-2.5 border-t border-black/10 dark:border-[rgba(255,255,255,0.1)]">
               <h4 className="text-xs font-semibold text-gray-500 dark:text-[#A8ABB4] mb-1">Context URLs Retrieved:</h4>
@@ -192,6 +212,32 @@ const MessageItem: React.FC<MessageItemProps> = ({ message }) => {
                 })}
               </ul>
             </div>
+          )}
+
+          {/* Google Search Grounding Display */}
+          {isModel && message.groundingMetadata && message.groundingMetadata.groundingChunks?.length > 0 && (
+             <div className="pt-2.5 border-t border-black/10 dark:border-[rgba(255,255,255,0.1)] mt-2">
+               <h4 className="text-xs font-semibold text-gray-500 dark:text-[#A8ABB4] mb-1 flex items-center gap-1">
+                 <Search size={12} /> Google Search Sources:
+               </h4>
+               <div className="flex flex-wrap gap-2">
+                 {message.groundingMetadata.groundingChunks.map((chunk, idx) => {
+                    if (!chunk.web) return null;
+                    return (
+                      <a 
+                        key={idx} 
+                        href={chunk.web.uri} 
+                        target="_blank" 
+                        rel="noopener noreferrer"
+                        className="text-[11px] bg-gray-100 dark:bg-white/5 hover:bg-gray-200 dark:hover:bg-white/10 px-2 py-1 rounded border border-gray-200 dark:border-white/5 text-blue-600 dark:text-[#79B8FF] truncate max-w-[200px]"
+                        title={chunk.web.title}
+                      >
+                        {chunk.web.title || chunk.web.uri}
+                      </a>
+                    );
+                 })}
+               </div>
+             </div>
           )}
         </div>
         {isUser && <SenderAvatar sender={message.sender} />}
