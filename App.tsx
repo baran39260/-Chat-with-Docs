@@ -4,7 +4,7 @@
 */
 
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { ChatMessage, MessageSender, KnowledgeGroup, KnowledgeItem } from './types';
+import { ChatMessage, MessageSender, KnowledgeGroup, KnowledgeItem, ChatSession } from './types';
 import { generateContentWithKnowledgeContext, getInitialSuggestions } from './services/geminiService';
 import KnowledgeBaseManager from './components/KnowledgeBaseManager';
 import ChatInterface from './components/ChatInterface';
@@ -47,6 +47,7 @@ const INITIAL_KNOWLEDGE_GROUPS: KnowledgeGroup[] = [
 const loadInitialState = () => {
   let groups: KnowledgeGroup[] = INITIAL_KNOWLEDGE_GROUPS;
   let activeId: string;
+  let history: ChatSession[] = [];
 
   try {
     const savedGroups = localStorage.getItem('DOC_BROWSER_KNOWLEDGE_GROUPS');
@@ -83,13 +84,29 @@ const loadInitialState = () => {
   } catch (e) {
     console.error("Failed to load/parse active group ID from localStorage:", e);
   }
+
+  try {
+    const savedHistory = localStorage.getItem('DOC_BROWSER_CHAT_HISTORY');
+    if (savedHistory) {
+      history = JSON.parse(savedHistory).map((session: any) => ({
+        ...session,
+        timestamp: new Date(session.timestamp),
+        messages: session.messages.map((msg: any) => ({
+            ...msg,
+            timestamp: new Date(msg.timestamp)
+        }))
+      }));
+    }
+  } catch (e) {
+    console.error("Failed to load chat history:", e);
+  }
   
-  return { initialGroups: groups, initialActiveId: activeId };
+  return { initialGroups: groups, initialActiveId: activeId, initialHistory: history };
 };
 
 
 const App: React.FC = () => {
-  const { initialGroups, initialActiveId } = useMemo(() => loadInitialState(), []);
+  const { initialGroups, initialActiveId, initialHistory } = useMemo(() => loadInitialState(), []);
   
   const [knowledgeGroups, setKnowledgeGroups] = useState<KnowledgeGroup[]>(initialGroups);
   const [activeKnowledgeGroupId, setActiveKnowledgeGroupId] = useState<string>(initialActiveId);
@@ -103,8 +120,17 @@ const App: React.FC = () => {
   const [isFetchingSuggestions, setIsFetchingSuggestions] = useState(false);
   const [initialQuerySuggestions, setInitialQuerySuggestions] = useState<string[]>([]);
   
+  // Chat History State
+  const [chatHistory, setChatHistory] = useState<ChatSession[]>(initialHistory);
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
+
   // Ref to track previous context to prevent unnecessary chat resets in 'all' mode
-  const prevContextRef = useRef<{ scope: 'current' | 'all', groupId: string }>({ scope: 'current', groupId: initialActiveId });
+  // Initialized with 'init' to force the first welcome message render
+  const prevContextRef = useRef<{ scope: string, groupId: string, groupCount: number }>({ 
+    scope: 'init', 
+    groupId: '', 
+    groupCount: 0 
+  });
 
   const MAX_ITEMS = 20;
 
@@ -151,6 +177,15 @@ const App: React.FC = () => {
     }
   }, [knowledgeGroups, activeKnowledgeGroupId]);
 
+  // Save chat history
+  useEffect(() => {
+      try {
+          localStorage.setItem('DOC_BROWSER_CHAT_HISTORY', JSON.stringify(chatHistory));
+      } catch (e) {
+          console.error("Failed to save chat history:", e);
+      }
+  }, [chatHistory]);
+
    useEffect(() => {
     const apiKey = process.env.API_KEY;
     
@@ -164,35 +199,61 @@ const App: React.FC = () => {
       return;
     }
 
-    // Determine the effective context ID.
-    // If scope is 'all', the context is global (or dependent on knowledgeGroups length), not specific to activeGroupId.
-    // If scope is 'current', context is specific to activeGroupId.
     const isAllScope = chatScope === 'all';
-    const currentContextId = isAllScope ? 'all-groups-context' : activeKnowledgeGroupId;
-    const prevContextId = isAllScope ? 'all-groups-context' : prevContextRef.current.groupId;
+    const currentActiveGroup = knowledgeGroups.find(group => group.id === activeKnowledgeGroupId);
+    const currentGroupCount = knowledgeGroups.length;
     
-    const hasScopeChanged = prevContextRef.current.scope !== chatScope;
-    const hasContextChanged = currentContextId !== prevContextId;
-
-    // Update ref
-    prevContextRef.current = { scope: chatScope, groupId: activeKnowledgeGroupId };
-
-    // If we are in 'all' mode and only the active group changed (for management), DO NOT reset the chat.
-    if (isAllScope && !hasScopeChanged && !hasContextChanged) {
-       return;
+    const prev = prevContextRef.current;
+    let shouldUpdate = false;
+    
+    // Check conditions for updating the chat context/welcome message
+    
+    // 1. Initial Load
+    if (prev.scope === 'init') {
+        shouldUpdate = true;
+    }
+    // 2. Scope Changed (e.g. from 'current' to 'all')
+    else if (chatScope !== prev.scope) {
+        shouldUpdate = true;
+    }
+    // 3. In 'all' mode, update if the number of knowledge groups changes
+    else if (isAllScope && currentGroupCount !== prev.groupCount) {
+        shouldUpdate = true;
+    }
+    // 4. In 'current' mode, update if the active group selection changes
+    else if (!isAllScope && activeKnowledgeGroupId !== prev.groupId) {
+        shouldUpdate = true;
     }
 
-    const currentActiveGroup = knowledgeGroups.find(group => group.id === activeKnowledgeGroupId);
-    const groupName = chatScope === 'all' 
-      ? `All Knowledge Groups (${knowledgeGroups.length} groups)` 
-      : (currentActiveGroup?.name || 'None');
-      
-    const welcomeMessageText = `Welcome to Documentation Browser! You're currently browsing content from: **${groupName}**.\n\nJust ask me questions, or try one of the suggestions below to get started`;
+    // If a user manually loaded a session, we don't want to overwrite it with a welcome message
+    // unless they change context *after* loading.
+    if (currentSessionId && !shouldUpdate) return;
+
+    // Update the reference for the next render
+    prevContextRef.current = { 
+        scope: chatScope, 
+        groupId: activeKnowledgeGroupId,
+        groupCount: currentGroupCount 
+    };
+
+    if (!shouldUpdate) return;
+
+    // Reset Session ID if context changes significantly (optional, helps keep "New Chat" logic clean)
+    setCurrentSessionId(null);
+
+    // Construct the welcome message based on the current scope
+    let welcomeText = '';
+    if (isAllScope) {
+        welcomeText = `### 🌐 All Knowledge Groups\n\nYou are currently chatting with content from **all ${currentGroupCount} knowledge groups**.\n\nAsk questions across your entire knowledge base, or try a suggestion below.`;
+    } else {
+        const groupName = currentActiveGroup?.name || 'Unknown Group';
+        welcomeText = `### 📂 ${groupName}\n\nYou are chatting with the **"${groupName}"** group.\n\nAsk questions about the documents in this group, or try a suggestion below.`;
+    }
     
     // Reset chat with new welcome message
     setChatMessages([{
-      id: `system-welcome-${currentContextId}-${Date.now()}`,
-      text: welcomeMessageText,
+      id: `system-welcome-${Date.now()}`,
+      text: welcomeText,
       sender: MessageSender.SYSTEM,
       timestamp: new Date(),
     }]);
@@ -249,6 +310,80 @@ const App: React.FC = () => {
         setInitialQuerySuggestions([]); 
     }
   }, [contextItems, fetchAndSetInitialSuggestions]); 
+
+  // --- Chat Session Management ---
+
+  const handleNewChat = () => {
+      setCurrentSessionId(null);
+      // Triggering a context refresh or just resetting to default welcome
+      const isAllScope = chatScope === 'all';
+      const currentActiveGroup = knowledgeGroups.find(group => group.id === activeKnowledgeGroupId);
+      const currentGroupCount = knowledgeGroups.length;
+      
+      let welcomeText = '';
+      if (isAllScope) {
+        welcomeText = `### 🌐 All Knowledge Groups\n\nYou are currently chatting with content from **all ${currentGroupCount} knowledge groups**.\n\nAsk questions across your entire knowledge base, or try a suggestion below.`;
+      } else {
+        const groupName = currentActiveGroup?.name || 'Unknown Group';
+        welcomeText = `### 📂 ${groupName}\n\nYou are chatting with the **"${groupName}"** group.\n\nAsk questions about the documents in this group, or try a suggestion below.`;
+      }
+
+      setChatMessages([{
+        id: `system-welcome-${Date.now()}`,
+        text: welcomeText,
+        sender: MessageSender.SYSTEM,
+        timestamp: new Date(),
+      }]);
+      
+      if (window.innerWidth < 768) {
+        setIsSidebarOpen(false);
+      }
+  };
+
+  const handleLoadSession = (session: ChatSession) => {
+      setCurrentSessionId(session.id);
+      setChatMessages(session.messages);
+      if (window.innerWidth < 768) {
+        setIsSidebarOpen(false);
+      }
+  };
+
+  const handleDeleteSession = (sessionId: string) => {
+      setChatHistory(prev => prev.filter(s => s.id !== sessionId));
+      if (currentSessionId === sessionId) {
+          handleNewChat();
+      }
+  };
+
+  const updateCurrentSession = (messages: ChatMessage[]) => {
+      // Don't save if it's just the welcome message or empty
+      const hasUserMessage = messages.some(m => m.sender === MessageSender.USER);
+      if (!hasUserMessage) return;
+
+      if (currentSessionId) {
+          // Update existing session
+          setChatHistory(prev => prev.map(session => {
+              if (session.id === currentSessionId) {
+                  return { ...session, messages, timestamp: new Date() };
+              }
+              return session;
+          }));
+      } else {
+          // Create new session
+          const newId = `session-${Date.now()}`;
+          const userMsg = messages.find(m => m.sender === MessageSender.USER);
+          const title = userMsg ? (userMsg.text.slice(0, 40) + (userMsg.text.length > 40 ? '...' : '')) : 'New Chat';
+          
+          const newSession: ChatSession = {
+              id: newId,
+              title,
+              messages,
+              timestamp: new Date()
+          };
+          setChatHistory(prev => [newSession, ...prev]);
+          setCurrentSessionId(newId);
+      }
+  };
 
 
   const handleAddItem = (item: KnowledgeItem) => {
@@ -420,13 +555,17 @@ const App: React.FC = () => {
       isLoading: true,
     };
 
-    setChatMessages(prevMessages => [...prevMessages, userMessage, modelPlaceholderMessage]);
+    // Optimistic update
+    const updatedMessages = [...chatMessages, userMessage, modelPlaceholderMessage];
+    setChatMessages(updatedMessages);
+    updateCurrentSession(updatedMessages); // Save immediate user input
 
     try {
       // Use contextItems (which respects chatScope) instead of currentGroupItems
       const response = await generateContentWithKnowledgeContext(query, contextItems);
-      setChatMessages(prevMessages =>
-        prevMessages.map(msg =>
+      
+      setChatMessages(prevMessages => {
+        const nextMessages = prevMessages.map(msg =>
           msg.id === modelPlaceholderMessage.id
             ? { 
                 ...modelPlaceholderMessage, 
@@ -436,17 +575,22 @@ const App: React.FC = () => {
                 groundingMetadata: response.groundingMetadata
               }
             : msg
-        )
-      );
+        );
+        // Save final response
+        updateCurrentSession(nextMessages);
+        return nextMessages;
+      });
     } catch (e: any) {
       const errorMessage = e.message || 'Failed to get response from AI.';
-      setChatMessages(prevMessages =>
-        prevMessages.map(msg =>
+      setChatMessages(prevMessages => {
+        const nextMessages = prevMessages.map(msg =>
           msg.id === modelPlaceholderMessage.id
             ? { ...modelPlaceholderMessage, text: `Error: ${errorMessage}`, sender: MessageSender.SYSTEM, isLoading: false } 
             : msg
-        )
-      );
+        );
+        updateCurrentSession(nextMessages);
+        return nextMessages;
+      });
     } finally {
       setIsLoading(false);
     }
@@ -503,6 +647,12 @@ const App: React.FC = () => {
             onMoveItemsAndDeleteGroup={handleMoveItemsAndDeleteGroup}
             chatScope={chatScope}
             onSetChatScope={setChatScope}
+            // History Props
+            chatHistory={chatHistory}
+            currentSessionId={currentSessionId}
+            onLoadSession={handleLoadSession}
+            onDeleteSession={handleDeleteSession}
+            onNewChat={handleNewChat}
           />
         </div>
 
@@ -518,6 +668,7 @@ const App: React.FC = () => {
             isFetchingSuggestions={isFetchingSuggestions}
             onToggleSidebar={() => setIsSidebarOpen(true)}
             inputDisabled={isApiKeyMissing}
+            onNewChat={handleNewChat}
           />
         </div>
       </div>

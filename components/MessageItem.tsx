@@ -50,8 +50,35 @@ renderer.code = function({ text, lang }: { text: string; lang?: string }) {
   `;
 };
 
-// Configure marked to use the custom renderer
-marked.setOptions({ renderer });
+// Custom Table Renderer to allow horizontal scrolling
+// @ts-ignore - ignoring strict type check for marked renderer signature
+renderer.table = function({ header, body }: { header: string; body: string }) {
+  return `
+    <div class="overflow-x-auto my-4 border border-gray-200 dark:border-white/10 rounded-lg">
+      <table class="min-w-full divide-y divide-gray-200 dark:divide-white/10">
+        <thead class="bg-gray-50 dark:bg-white/5">
+          ${header}
+        </thead>
+        <tbody class="divide-y divide-gray-200 dark:divide-white/5 bg-white dark:bg-transparent">
+          ${body}
+        </tbody>
+      </table>
+    </div>
+  `;
+};
+
+// Custom Link Renderer to force new tab
+// @ts-ignore
+renderer.link = function({ href, title, text }: { href: string; title: string | null; text: string }) {
+  return `<a href="${href}" title="${title || ''}" target="_blank" rel="noopener noreferrer">${text}</a>`;
+};
+
+// Configure marked to use the custom renderer and enable options
+marked.setOptions({ 
+  renderer,
+  gfm: true, // GitHub Flavored Markdown
+  breaks: true, // Render newlines as <br>
+});
 
 
 interface MessageItemProps {
@@ -137,7 +164,8 @@ const MessageItem: React.FC<MessageItemProps> = ({ message }) => {
     // Render markdown for both user and model messages to support code blocks, etc.
     if (isUser || isModel) {
       // Use dark:prose-invert for automatic dark mode styling of markdown content
-      const proseClasses = "prose prose-sm w-full min-w-0 prose-last:mb-0 dark:prose-invert";
+      // Added custom classes to help with spacing in lists and tables
+      const proseClasses = "prose prose-sm w-full min-w-0 prose-last:mb-0 dark:prose-invert prose-p:leading-relaxed prose-pre:p-0 prose-li:marker:text-gray-400 dark:prose-li:marker:text-gray-500";
       const rawMarkup = marked.parse(message.text || "") as string;
       return <div ref={contentRef} className={proseClasses} dangerouslySetInnerHTML={{ __html: rawMarkup }} />;
     }
@@ -160,7 +188,7 @@ const MessageItem: React.FC<MessageItemProps> = ({ message }) => {
 
   return (
     <div className={`flex mb-4 ${isUser ? 'justify-end' : 'justify-start'}`}>
-      <div className={`flex items-start gap-2 max-w-[85%]`}>
+      <div className={`flex items-start gap-2 max-w-[95%] md:max-w-[85%]`}>
         {!isUser && <SenderAvatar sender={message.sender} />}
         <div className={getBubbleClasses()}>
           {(isUser || isModel) && !message.isLoading && (

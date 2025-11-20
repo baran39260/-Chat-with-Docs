@@ -6,7 +6,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { ChatMessage, MessageSender } from '../types'; 
 import MessageItem from './MessageItem';
-import { Send, Menu } from 'lucide-react';
+import { Send, Menu, MessageSquarePlus } from 'lucide-react';
 import ThemeSwitcher from './ThemeSwitcher';
 
 interface ChatInterfaceProps {
@@ -19,6 +19,7 @@ interface ChatInterfaceProps {
   isFetchingSuggestions?: boolean;
   onToggleSidebar?: () => void;
   inputDisabled?: boolean;
+  onNewChat?: () => void;
 }
 
 const ChatInterface: React.FC<ChatInterfaceProps> = ({ 
@@ -31,6 +32,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
   isFetchingSuggestions,
   onToggleSidebar,
   inputDisabled = false,
+  onNewChat,
 }) => {
   const [userQuery, setUserQuery] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -99,7 +101,19 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
             )}
           </div>
         </div>
-        <ThemeSwitcher />
+        <div className="flex items-center gap-2">
+          {onNewChat && (
+            <button
+              onClick={onNewChat}
+              className="p-2 text-gray-500 dark:text-[#A8ABB4] hover:text-blue-600 dark:hover:text-blue-400 rounded-md hover:bg-blue-50 dark:hover:bg-blue-500/10 transition-colors"
+              aria-label="Start new chat"
+              title="Start new chat"
+            >
+              <MessageSquarePlus size={20} />
+            </button>
+          )}
+          <ThemeSwitcher />
+        </div>
       </div>
 
       <div className="flex-grow p-4 overflow-y-auto chat-container bg-gray-100 dark:bg-[#282828]">

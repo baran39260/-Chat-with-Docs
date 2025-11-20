@@ -67,15 +67,11 @@ const buildPromptWithContext = (prompt: string, items: KnowledgeItem[]): { fullP
 
   // Configure tools:
   // 1. googleSearch: Always enable to allow the model to find up-to-date info.
-  // 2. urlContext: Enable if URLs are provided in the knowledge base.
+  // Note: googleSearch cannot be combined with other tools like urlContext in the current API version.
   const tools: Tool[] = [
     { googleSearch: {} }
   ];
 
-  if (urls.length > 0) {
-    tools.push({ urlContext: { urls: urls } });
-  }
-  
   return { fullPrompt, tools };
 }
 
@@ -114,7 +110,7 @@ export const generateContentWithKnowledgeContext = async (
     let extractedUrlContextMetadata: UrlContextMetadataItem[] | undefined = undefined;
     let extractedGroundingMetadata: GroundingMetadata | undefined = undefined;
 
-    // Extract URL Context Metadata
+    // Extract URL Context Metadata (might be present if model decides to browse even without explicit tool, or legacy support)
     if (candidate && candidate.urlContextMetadata && candidate.urlContextMetadata.urlMetadata) {
       console.log("Raw candidate.urlContextMetadata.urlMetadata from API/SDK:", JSON.stringify(candidate.urlContextMetadata.urlMetadata, null, 2));
       extractedUrlContextMetadata = candidate.urlContextMetadata.urlMetadata as UrlContextMetadataItem[];

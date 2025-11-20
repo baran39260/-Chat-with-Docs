@@ -40,6 +40,13 @@ export interface ChatMessage {
   groundingMetadata?: GroundingMetadata;
 }
 
+export interface ChatSession {
+  id: string;
+  title: string;
+  messages: ChatMessage[];
+  timestamp: Date;
+}
+
 export type KnowledgeItem =
   | { type: 'url'; value: string }
   | { type: 'file'; name: string; content: string; mimeType: string };
